@@ -39,6 +39,44 @@ let loadNativeDependencies(appRoot: string) =
         openLib "libjitinterface_x64.so"
 
 
+// FSharp.Compiler.Service probes the dotnet host by walking up from the
+// location of System.Private.CoreLib. In a single-file bundle that location
+// is empty, so FCS throws before it falls back to searching PATH.
+let ensureDotnetHostPath () =
+    let current = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH")
+
+    if String.IsNullOrEmpty(current) || not (File.Exists current) then
+        let dotnet = if OperatingSystem.IsWindows() then "dotnet.exe" else "dotnet"
+
+        let resolve (path: string) =
+            try
+                match File.ResolveLinkTarget(path, true) with
+                | null -> Path.GetFullPath path
+                | target -> target.FullName
+            with _ ->
+                Path.GetFullPath path
+
+        let fromRuntime =
+            let runtimeDir =
+                System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory()
+
+            Path.GetFullPath(Path.Combine(runtimeDir, "..", "..", "..", dotnet))
+
+        let fromPath =
+            let paths = Environment.GetEnvironmentVariable("PATH")
+
+            if String.IsNullOrEmpty(paths) then
+                None
+            else
+                paths.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+                |> Array.map (fun dir -> Path.Combine(dir, dotnet))
+                |> Array.tryFind File.Exists
+
+        match (if File.Exists fromRuntime then Some fromRuntime else fromPath) with
+        | Some path -> Environment.SetEnvironmentVariable("DOTNET_HOST_PATH", resolve path)
+        | None -> ()
+
+
 let compileLib (options: CompileOptions) (inputScript: string) (args: string list) =
     let outputPath =
         match options.OutPath with
@@ -152,10 +190,10 @@ let main argv =
     if OperatingSystem.IsMacOS() then
         failwith "the bflat compiler does not support MacOS!"
 
+    ensureDotnetHostPath ()
+
     // to ensure it works without LD_LIBRARY_PATH
-    Environment.GetCommandLineArgs()[0]
-    |> System.IO.Path.GetDirectoryName
-    |> loadNativeDependencies
+    loadNativeDependencies AppContext.BaseDirectory
 
     let errorHandler =
         { new IExiter with
